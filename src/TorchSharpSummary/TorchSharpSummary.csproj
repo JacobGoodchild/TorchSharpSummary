@@ -1,0 +1,32 @@
+<Project Sdk="Microsoft.NET.Sdk">
+
+  <PropertyGroup>
+    <TargetFramework>net8.0</TargetFramework>
+    <LangVersion>12</LangVersion>
+    <ImplicitUsings>enable</ImplicitUsings>
+    <Nullable>enable</Nullable>
+    <TreatWarningsAsErrors>true</TreatWarningsAsErrors>
+    <AnalysisLevel>latest</AnalysisLevel>
+  </PropertyGroup>
+
+  <PropertyGroup>
+    <PackageId>TorchSharpSummary</PackageId>
+    <Version>0.1.0</Version>
+    <Authors>TorchSharpSummary Contributors</Authors>
+    <Description>A lightweight, leak-free model summary and diagnostic utility for TorchSharp, inspired by Python's torchinfo. Prints layer-by-layer output shapes, parameter counts, memory footprint, and FLOP/MAC estimates for torch.nn.Module.</Description>
+    <PackageTags>torchsharp;torch;pytorch;summary;torchinfo;deep-learning;machine-learning</PackageTags>
+    <RepositoryType>git</RepositoryType>
+    <PackageReadmeFile>README.md</PackageReadmeFile>
+    <PackageLicenseExpression>MIT</PackageLicenseExpression>
+    <GenerateDocumentationFile>true</GenerateDocumentationFile>
+  </PropertyGroup>
+
+  <ItemGroup>
+    <PackageReference Include="TorchSharp" Version="0.107.0" />
+  </ItemGroup>
+
+  <ItemGroup>
+    <None Include="../../README.md" Pack="true" PackagePath="\" />
+  </ItemGroup>
+
+</Project>

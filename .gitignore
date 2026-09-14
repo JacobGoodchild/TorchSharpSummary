@@ -1,0 +1,10 @@
+## .NET build artifacts
+bin/
+obj/
+*.user
+
+## OS / editor cruft
+.vs/
+.vscode/
+.idea/
+*.DotSettings.user
