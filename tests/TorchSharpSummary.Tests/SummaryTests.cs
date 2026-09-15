@@ -397,6 +397,38 @@ public class SummaryTests
         Assert.Equal(first.Layers.Count, third.Layers.Count);
         Assert.Equal(3, third.Layers.Count); // root + fc1 + fc2, exactly once each
     }
+
+    // ---------------------------------------------------------------------
+    // A submodule invoked more than once in a single forward pass
+    // (weight sharing / a loop over the same layer)
+    // ---------------------------------------------------------------------
+
+    [Fact]
+    public void WeightSharedSubmodule_GetsOneRowPerCall_EachWithItsOwnChildrenOnly()
+    {
+        using var model = new WeightSharedTwice();
+
+        var summary = model.Summary(new long[] { 1, 4 });
+
+        // block ran twice, each with its own one child: root + 2*block + 2*block.inner = 5 rows
+        // total — never fewer (occurrences deduplicated away) or with a child's row duplicated
+        // under both "block" occurrences (the bug this test guards against).
+        Assert.Equal(5, summary.Layers.Count);
+        Assert.Equal(2, summary.Layers.Count(l => l.Name == "block"));
+        Assert.Equal(2, summary.Layers.Count(l => l.Name == "block.inner"));
+
+        // Only the first occurrence owns the (shared) parameters — no double counting.
+        var blockCalls = summary.Layers.Where(l => l.Name == "block.inner").ToList();
+        Assert.True(blockCalls[0].TrainableParams > 0);
+        Assert.Equal(0, blockCalls[1].TrainableParams);
+        Assert.Equal(blockCalls[0].TrainableParams, summary.TrainableParams);
+
+        string rendered = summary.ToString();
+        // Each "block" occurrence shows its own single child exactly once — not duplicated
+        // across both calls, and not merged into one.
+        Assert.Equal(2, System.Text.RegularExpressions.Regex.Matches(rendered, "inner \\(Linear\\)").Count);
+        Assert.Contains("(recursive)", rendered);
+    }
 }
 
 /// <summary>
@@ -436,5 +468,27 @@ internal sealed class TupleReturningModule : torch.nn.Module<Tensor, (Tensor, Te
     {
         var y = fc.call(x);
         return (y, y);
+    }
+}
+
+/// <summary>
+/// A module that invokes the same submodule twice within one forward pass (weight sharing),
+/// used to exercise tree reconstruction when a module's name doesn't uniquely identify a
+/// single execution.
+/// </summary>
+internal sealed class WeightSharedTwice : torch.nn.Module<Tensor, Tensor>
+{
+    private readonly Sequential block;
+
+    public WeightSharedTwice() : base(nameof(WeightSharedTwice))
+    {
+        block = Sequential(("inner", Linear(4, 4)));
+        RegisterComponents();
+    }
+
+    public override Tensor forward(Tensor x)
+    {
+        var y = block.call(x);
+        return block.call(y);
     }
 }

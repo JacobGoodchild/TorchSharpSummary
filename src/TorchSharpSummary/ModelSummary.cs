@@ -93,55 +93,80 @@ public sealed class ModelSummary
     private readonly record struct TreeRow(LayerInfo Layer, string TreeLabel);
 
     /// <summary>
-    /// Walks <see cref="Layers"/> — stored in actual execution order, children before the
-    /// parent that contains them — into a proper depth-first display order: the root model
-    /// first (as a header row), then each child immediately followed by its own children,
-    /// each row prefixed with box-drawing branch connectors so nesting reads as a tree rather
-    /// than a flat, same-indent list. Rows deeper than <see cref="SummaryOptions.MaxDepth"/>
-    /// are pruned (along with their descendants).
+    /// Reconstructs the actual call tree from <see cref="Layers"/> and walks it into display
+    /// order: the root model first (as a header row), then each child immediately followed by
+    /// its own children, each row prefixed with box-drawing branch connectors so nesting reads
+    /// as a tree rather than a flat, same-indent list. Rows deeper than
+    /// <see cref="SummaryOptions.MaxDepth"/> are pruned (along with their descendants).
     /// </summary>
+    /// <remarks>
+    /// <see cref="Layers"/> is stored in actual execution order, which for a forward pass is a
+    /// post-order traversal of the call tree: every descendant of a call finishes (and fires its
+    /// hook) before that call's own hook fires. Parentage is reconstructed from that order plus
+    /// each row's <see cref="LayerInfo.Depth"/> — deliberately <i>not</i> from matching dotted
+    /// names, because a module invoked more than once in one pass (weight sharing, a loop) shows
+    /// up as multiple distinct rows that share the same name; grouping by name would smear every
+    /// occurrence's children across all of them. Grouping by reference identity instead gives
+    /// each call its own, correctly-scoped set of children.
+    /// </remarks>
     private List<TreeRow> BuildTreeRows()
     {
         LayerInfo? root = null;
-        var childrenByParent = new Dictionary<string, List<LayerInfo>>();
+        // pendingChildren[d] accumulates rows at depth d that haven't yet been claimed by an
+        // enclosing call at depth d-1. Because the input is post-order, a call's own children
+        // are always exactly whatever is sitting in pendingChildren[call.Depth + 1] at the
+        // moment the call itself is reached.
+        var pendingChildren = new Dictionary<int, List<LayerInfo>>();
+        var childrenOf = new Dictionary<LayerInfo, List<LayerInfo>>();
+        var occurrenceIndexOf = new Dictionary<LayerInfo, int>();
+        var occurrencesSeenByName = new Dictionary<string, int>();
+
         foreach (var layer in Layers)
         {
             if (layer.Depth == -1) { root = layer; continue; }
 
-            string parent = ParentName(layer.Name);
-            if (!childrenByParent.TryGetValue(parent, out var siblings))
-                childrenByParent[parent] = siblings = new List<LayerInfo>();
+            childrenOf[layer] = pendingChildren.TryGetValue(layer.Depth + 1, out var claimed)
+                ? claimed
+                : new List<LayerInfo>();
+            pendingChildren.Remove(layer.Depth + 1);
+
+            if (!pendingChildren.TryGetValue(layer.Depth, out var siblings))
+                pendingChildren[layer.Depth] = siblings = new List<LayerInfo>();
             siblings.Add(layer);
+
+            occurrenceIndexOf[layer] = occurrencesSeenByName.GetValueOrDefault(layer.Name);
+            occurrencesSeenByName[layer.Name] = occurrenceIndexOf[layer] + 1;
         }
 
         var rows = new List<TreeRow>();
         if (root is not null)
-            rows.Add(new TreeRow(root, $"{root.LayerType}"));
+            rows.Add(new TreeRow(root, root.LayerType));
 
-        void Walk(string parentName, string continuationPrefix)
+        // Whatever never got claimed by an enclosing call is, by construction, the top level.
+        var topLevel = pendingChildren.GetValueOrDefault(0, new List<LayerInfo>());
+
+        void Walk(LayerInfo layer, string continuationPrefix, bool isLast)
         {
-            if (!childrenByParent.TryGetValue(parentName, out var children)) return;
+            if (layer.Depth > Options.MaxDepth) return;
 
+            string leafName = LeafName(layer.Name);
+            // A module invoked more than once in a single pass reuses the same weights, so only
+            // its first occurrence carries parameter counts (see AttachParameterCounts) — later
+            // occurrences are flagged "(recursive)" here, matching torchinfo's convention, so the
+            // repeat reads as intentional rather than as a rendering bug.
+            string recursiveTag = occurrenceIndexOf[layer] > 0 ? " (recursive)" : "";
+            rows.Add(new TreeRow(layer, $"{continuationPrefix}{(isLast ? "└─ " : "├─ ")}{leafName} ({layer.LayerType}){recursiveTag}"));
+
+            var children = childrenOf.GetValueOrDefault(layer, new List<LayerInfo>());
+            string childPrefix = continuationPrefix + (isLast ? "   " : "│  ");
             for (int i = 0; i < children.Count; i++)
-            {
-                var child = children[i];
-                if (child.Depth > Options.MaxDepth) continue;
-
-                bool isLast = i == children.Count - 1;
-                string leafName = LeafName(child.Name);
-                rows.Add(new TreeRow(child, $"{continuationPrefix}{(isLast ? "└─ " : "├─ ")}{leafName} ({child.LayerType})"));
-                Walk(child.Name, continuationPrefix + (isLast ? "   " : "│  "));
-            }
+                Walk(children[i], childPrefix, i == children.Count - 1);
         }
 
-        Walk(string.Empty, string.Empty);
-        return rows;
-    }
+        for (int i = 0; i < topLevel.Count; i++)
+            Walk(topLevel[i], string.Empty, i == topLevel.Count - 1);
 
-    private static string ParentName(string dottedName)
-    {
-        int lastDot = dottedName.LastIndexOf('.');
-        return lastDot < 0 ? string.Empty : dottedName[..lastDot];
+        return rows;
     }
 
     private static string LeafName(string dottedName)
