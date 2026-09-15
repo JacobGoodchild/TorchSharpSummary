@@ -33,8 +33,10 @@ namespace TorchSharpSummary;
 /// TorchSharp layers and typical branching/merge modules. A submodule with a different
 /// forward signature (four or more tensor inputs, non-tensor arguments, or a tuple return)
 /// is simply not hooked: its own row will not appear in the table, but its parameters are
-/// still counted correctly in the model-level totals. MAC/FLOP estimates are only computed
-/// precisely for <c>Linear</c> and convolution layers (see <see cref="LayerInfo.Macs"/>).
+/// still counted correctly in the model-level totals. MAC/FLOP estimates are computed
+/// precisely for <c>Linear</c>, convolution, and normalization layers (see
+/// <see cref="LayerInfo.Macs"/>); other layer types (activations, pooling, dropout,
+/// recurrent layers) report <c>0</c>.
 /// </para>
 /// </remarks>
 public static class ModuleExtensions
@@ -100,8 +102,11 @@ public static class ModuleExtensions
             // The root module is hooked too (depth -1, so it always renders regardless of
             // SummaryOptions.MaxDepth) — this is the only way a model that is itself a leaf
             // module (e.g. a bare Linear used directly as the root) gets a row at all, since
-            // named_modules() below only enumerates its *children*.
-            RegisterHook(module, module.GetType().Name, depth: -1, executed, hookRemovers);
+            // named_modules() below only enumerates its *children*. Its Name is the empty
+            // string, matching the owner key AttachParameterCounts computes for a parameter
+            // with no dotted prefix (e.g. root.weight) — so a leaf root's own parameters land
+            // on its row instead of silently going unassigned.
+            RegisterHook(module, name: string.Empty, depth: -1, executed, hookRemovers);
 
             foreach (var (name, submodule) in module.named_modules())
             {
@@ -269,8 +274,12 @@ public static class ModuleExtensions
 
     /// <summary>
     /// Estimates multiply-accumulate operations (MACs) for one execution of <paramref name="submodule"/>
-    /// given the output shape it produced. Precisely computed for <see cref="Linear"/> and convolution
-    /// layers (<see cref="Convolution"/>); every other layer type reports <c>0</c> (rendered as "--").
+    /// given the output shape it produced. Precisely computed for <see cref="Linear"/>, convolution
+    /// layers (<see cref="Convolution"/>: <c>Conv1d</c>/<c>Conv2d</c>/<c>Conv3d</c>, including grouped
+    /// convolutions), and the affine step of normalization layers (<see cref="NormBase"/> — i.e.
+    /// <c>BatchNorm1d</c>/<c>2d</c>/<c>3d</c>/<c>InstanceNorm*</c> — plus <see cref="LayerNorm"/> and
+    /// <see cref="GroupNorm"/>). Every other layer type reports <c>0</c> (rendered as "--") — activation,
+    /// pooling, dropout, and recurrent (RNN/LSTM/GRU) layers are not yet modeled.
     /// FLOPs are conventionally ~2x MACs for a multiply-then-add.
     /// </summary>
     private static long EstimateMacs(torch.nn.Module submodule, long[] outputShape)
@@ -286,6 +295,18 @@ public static class ModuleExtensions
             long inChannelsPerGroup = conv.groups > 0 ? conv.in_channels / conv.groups : conv.in_channels;
             return outputElements * kernelVolume * inChannelsPerGroup;
         }
+
+        // Normalization layers: the affine step (y = x * weight + bias) is one multiply-add
+        // per output element. The normalization statistics themselves (mean/variance) are not
+        // counted — they dominate compute far less than the affine transform for typical shapes.
+        if (submodule is NormBase norm)
+            return norm.affine ? outputElements : 0;
+
+        if (submodule is LayerNorm layerNorm)
+            return layerNorm.elementwise_affine ? outputElements : 0;
+
+        if (submodule is GroupNorm groupNorm)
+            return groupNorm.affine ? outputElements : 0;
 
         return 0;
     }

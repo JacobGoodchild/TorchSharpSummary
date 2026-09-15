@@ -48,7 +48,8 @@ public sealed class ModelSummary
     /// <inheritdoc />
     public override string ToString()
     {
-        var columns = BuildColumns();
+        var rows = BuildTreeRows();
+        var columns = BuildColumns(rows);
         int totalWidth = columns.Sum(c => c.Width) + (columns.Count - 1);
         string majorRule = new string('=', totalWidth);
         string minorRule = new string('-', totalWidth);
@@ -59,13 +60,9 @@ public sealed class ModelSummary
         sb.Append(string.Join(" ", columns.Select(c => c.Header.PadRight(c.Width)))).Append('\n');
         sb.Append(majorRule).Append('\n');
 
-        // Layers are stored in actual execution order (children fire before the parent that
-        // contains them), but that reads oddly as a table: show the root model first, as a
-        // header row, followed by its children in the order they actually ran.
-        var displayOrder = Layers.Where(l => l.Depth == -1).Concat(Layers.Where(l => l.Depth != -1));
-        foreach (var layer in displayOrder.Where(l => l.Depth <= Options.MaxDepth))
+        foreach (var row in rows)
         {
-            sb.Append(string.Join(" ", columns.Select(c => FitToWidth(c.Select(layer), c.Width))))
+            sb.Append(string.Join(" ", columns.Select(c => FitToWidth(c.Select(row), c.Width))))
               .Append('\n');
         }
 
@@ -92,24 +89,101 @@ public sealed class ModelSummary
         return sb.ToString();
     }
 
-    private List<(string Header, int Width, Func<LayerInfo, string> Select)> BuildColumns()
+    /// <summary>One line of the rendered table: a layer plus the tree-branch prefix ("├─ ", "│  └─ ", ...) in front of its own name.</summary>
+    private readonly record struct TreeRow(LayerInfo Layer, string TreeLabel);
+
+    /// <summary>
+    /// Walks <see cref="Layers"/> — stored in actual execution order, children before the
+    /// parent that contains them — into a proper depth-first display order: the root model
+    /// first (as a header row), then each child immediately followed by its own children,
+    /// each row prefixed with box-drawing branch connectors so nesting reads as a tree rather
+    /// than a flat, same-indent list. Rows deeper than <see cref="SummaryOptions.MaxDepth"/>
+    /// are pruned (along with their descendants).
+    /// </summary>
+    private List<TreeRow> BuildTreeRows()
     {
-        var columns = new List<(string, int, Func<LayerInfo, string>)>
+        LayerInfo? root = null;
+        var childrenByParent = new Dictionary<string, List<LayerInfo>>();
+        foreach (var layer in Layers)
         {
-            ("Layer (type)", Options.NameColumnWidth, l => new string(' ', Math.Max(0, l.Depth) * 2) + $"{l.Name} ({l.LayerType})"),
+            if (layer.Depth == -1) { root = layer; continue; }
+
+            string parent = ParentName(layer.Name);
+            if (!childrenByParent.TryGetValue(parent, out var siblings))
+                childrenByParent[parent] = siblings = new List<LayerInfo>();
+            siblings.Add(layer);
+        }
+
+        var rows = new List<TreeRow>();
+        if (root is not null)
+            rows.Add(new TreeRow(root, $"{root.LayerType}"));
+
+        void Walk(string parentName, string continuationPrefix)
+        {
+            if (!childrenByParent.TryGetValue(parentName, out var children)) return;
+
+            for (int i = 0; i < children.Count; i++)
+            {
+                var child = children[i];
+                if (child.Depth > Options.MaxDepth) continue;
+
+                bool isLast = i == children.Count - 1;
+                string leafName = LeafName(child.Name);
+                rows.Add(new TreeRow(child, $"{continuationPrefix}{(isLast ? "└─ " : "├─ ")}{leafName} ({child.LayerType})"));
+                Walk(child.Name, continuationPrefix + (isLast ? "   " : "│  "));
+            }
+        }
+
+        Walk(string.Empty, string.Empty);
+        return rows;
+    }
+
+    private static string ParentName(string dottedName)
+    {
+        int lastDot = dottedName.LastIndexOf('.');
+        return lastDot < 0 ? string.Empty : dottedName[..lastDot];
+    }
+
+    private static string LeafName(string dottedName)
+    {
+        int lastDot = dottedName.LastIndexOf('.');
+        return lastDot < 0 ? dottedName : dottedName[(lastDot + 1)..];
+    }
+
+    private List<(string Header, int Width, Func<TreeRow, string> Select)> BuildColumns(List<TreeRow> rows)
+    {
+        // The name column grows to fit the deepest/longest entry actually being rendered
+        // (tree prefixes get wider with nesting), instead of silently truncating everything
+        // past a fixed guess. Options.NameColumnWidth acts as a floor, not a ceiling.
+        int nameWidth = Math.Max(Options.NameColumnWidth, rows.Count == 0 ? 0 : rows.Max(r => r.TreeLabel.Length));
+
+        var columns = new List<(string, int, Func<TreeRow, string>)>
+        {
+            ("Layer (type)", nameWidth, r => r.TreeLabel),
         };
 
         if (Options.ShowInputShape)
-            columns.Add(("Input Shape", 22, l => FormatShapes(l.InputShapes)));
+            columns.Add(("Input Shape", 22, r => FormatShapes(r.Layer.InputShapes)));
         if (Options.ShowOutputShape)
-            columns.Add(("Output Shape", 22, l => l.OutputShape is null ? "--" : FormatShape(l.OutputShape)));
+            columns.Add(("Output Shape", 22, r => r.Layer.OutputShape is null ? "--" : FormatShape(r.Layer.OutputShape)));
         if (Options.ShowParamCount)
-            columns.Add(("Param #", 16, l => l.TotalParams == 0 ? "--" : l.TotalParams.ToString("N0")));
+        {
+            columns.Add(("Param #", 16, r => r.Layer.TotalParams == 0 ? "--" : r.Layer.TotalParams.ToString("N0")));
+            columns.Add(("Trainable", 9, r => TrainableLabel(r.Layer)));
+        }
         if (Options.ShowMacs)
-            columns.Add(("Mult-Adds", 16, l => l.Macs == 0 ? "--" : l.Macs.ToString("N0")));
+            columns.Add(("Mult-Adds", 16, r => r.Layer.Macs == 0 ? "--" : r.Layer.Macs.ToString("N0")));
 
         return columns;
     }
+
+    private static string TrainableLabel(LayerInfo layer) => (layer.TrainableParams, layer.NonTrainableParams) switch
+    {
+        (0, 0) => "--",
+        (> 0, 0) => "Yes",
+        (0, > 0) => "No",
+        _ => "Mixed",
+    };
 
     private double ConvertBytes(long bytes) => Options.MemoryUnit switch
     {

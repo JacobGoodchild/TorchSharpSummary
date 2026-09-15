@@ -254,6 +254,149 @@ public class SummaryTests
         Assert.Contains($"Total params: {summary.TotalParams:N0}", rendered);
         Assert.Contains("Estimated Total Size", rendered);
     }
+
+    // ---------------------------------------------------------------------
+    // Tree rendering (nesting, branch connectors)
+    // ---------------------------------------------------------------------
+
+    [Fact]
+    public void ToString_RendersNestedModules_AsATreeWithBranchConnectors()
+    {
+        using var block = Sequential(("conv", Conv2d(1, 4, kernel_size: 3, padding: 1)), ("relu", ReLU()));
+        using var model = Sequential(("block", block), ("flatten", Flatten()), ("fc", Linear(4 * 8 * 8, 2)));
+
+        string rendered = model.Summary(new long[] { 1, 1, 8, 8 }).ToString();
+        var lines = rendered.Split('\n');
+
+        // "block" is a mid-tree, non-last sibling: '├─', and its children hang off a
+        // continued vertical bar; "fc" is the last top-level sibling: '└─'.
+        Assert.Contains(lines, l => l.TrimStart().StartsWith("Sequential") && !l.Contains('├') && !l.Contains('└'));
+        Assert.Contains(lines, l => l.Contains("├─ block (Sequential)"));
+        Assert.Contains(lines, l => l.Contains("│  ├─ conv (Conv2d)"));
+        Assert.Contains(lines, l => l.Contains("│  └─ relu (ReLU)"));
+        Assert.Contains(lines, l => l.Contains("└─ fc (Linear)"));
+    }
+
+    [Fact]
+    public void ToString_NameColumn_GrowsToFitDeeplyNestedNames_InsteadOfTruncating()
+    {
+        using var inner = Sequential(("a-reasonably-long-inner-name", Linear(4, 4)));
+        using var outer = Sequential(("an-equally-long-outer-name", inner));
+
+        string rendered = outer.Summary(new long[] { 1, 4 }).ToString();
+
+        Assert.Contains("a-reasonably-long-inner-name (Linear)", rendered);
+        Assert.DoesNotContain("…", rendered); // no ellipsis truncation of the name itself
+    }
+
+    // ---------------------------------------------------------------------
+    // MAC estimates for normalization layers
+    // ---------------------------------------------------------------------
+
+    [Fact]
+    public void Macs_AreComputedForAffineNormalizationLayers()
+    {
+        using var affine = BatchNorm1d(8);
+        using var noAffine = BatchNorm1d(8, affine: false);
+
+        var affineSummary = affine.Summary(new long[] { 2, 8 });
+        var noAffineSummary = noAffine.Summary(new long[] { 2, 8 });
+
+        // One multiply-add per output element when the affine transform is applied...
+        Assert.Equal(2 * 8, affineSummary.Layers.Single(l => l.Depth == -1).Macs);
+        // ...and none when it isn't (pure normalization, no learned scale/shift).
+        Assert.Equal(0, noAffineSummary.Layers.Single(l => l.Depth == -1).Macs);
+    }
+
+    [Fact]
+    public void Macs_AreComputedForLayerNormAndGroupNorm()
+    {
+        using var layerNorm = LayerNorm(new long[] { 16 });
+        using var groupNorm = GroupNorm(num_groups: 4, num_channels: 8);
+
+        Assert.Equal(2 * 16, layerNorm.Summary(new long[] { 2, 16 }).Layers.Single(l => l.Depth == -1).Macs);
+        Assert.Equal(1 * 8 * 4 * 4, groupNorm.Summary(new long[] { 1, 8, 4, 4 }).Layers.Single(l => l.Depth == -1).Macs);
+    }
+
+    // ---------------------------------------------------------------------
+    // Trainable column semantics
+    // ---------------------------------------------------------------------
+
+    [Fact]
+    public void TrainableParams_ReportsMixed_WhenOnlySomeOfALayersParamsAreFrozen()
+    {
+        using var model = Linear(4, 4);
+        model.bias!.requires_grad_(false); // weight stays trainable, bias does not
+
+        var summary = model.Summary(new long[] { 1, 4 });
+        var row = summary.Layers.Single(l => l.Depth == -1);
+
+        Assert.True(row.TrainableParams > 0);
+        Assert.True(row.NonTrainableParams > 0);
+        Assert.Contains("Mixed", summary.ToString());
+    }
+
+    // ---------------------------------------------------------------------
+    // Additional layer coverage
+    // ---------------------------------------------------------------------
+
+    [Fact]
+    public void Conv1dAndConv3d_ResolveShapesAndMacs_LikeConv2d()
+    {
+        using var conv1d = Conv1d(1, 4, kernel_size: 3, padding: 1);
+        var summary1d = conv1d.Summary(new long[] { 1, 1, 10 });
+        var row1d = summary1d.Layers.Single(l => l.Depth == -1);
+        Assert.Equal(new long[] { 1, 4, 10 }, row1d.OutputShape);
+        Assert.Equal(1L * 4 * 10 * 3 * 1, row1d.Macs);
+
+        using var conv3d = Conv3d(1, 2, kernel_size: 3, padding: 1);
+        var summary3d = conv3d.Summary(new long[] { 1, 1, 4, 4, 4 });
+        var row3d = summary3d.Layers.Single(l => l.Depth == -1);
+        Assert.Equal(new long[] { 1, 2, 4, 4, 4 }, row3d.OutputShape);
+        Assert.Equal(1L * 2 * 4 * 4 * 4 * 27 * 1, row3d.Macs);
+    }
+
+    // ---------------------------------------------------------------------
+    // Error paths
+    // ---------------------------------------------------------------------
+
+    [Fact]
+    public void Summary_Throws_WhenInputShapeArityDoesNotMatchForward()
+    {
+        using var model = Linear(4, 4); // forward(Tensor) takes exactly one input
+
+        var ex = Assert.Throws<InvalidOperationException>(
+            () => model.Summary(new long[] { 1, 4 }, new long[] { 1, 4 }));
+        Assert.Contains("call", ex.Message);
+    }
+
+    [Fact]
+    public void Summary_Throws_WhenForwardDoesNotReturnASingleTensor()
+    {
+        using var model = new TupleReturningModule(4, 4);
+
+        var ex = Assert.Throws<NotSupportedException>(() => model.Summary(new long[] { 1, 4 }));
+        Assert.Contains("single Tensor", ex.Message);
+    }
+
+    // ---------------------------------------------------------------------
+    // Repeated calls
+    // ---------------------------------------------------------------------
+
+    [Fact]
+    public void Summary_CalledRepeatedly_NeverAccumulatesHooks()
+    {
+        using var model = Sequential(("fc1", Linear(4, 8)), ("fc2", Linear(8, 2)));
+
+        var first = model.Summary(new long[] { 1, 4 });
+        var second = model.Summary(new long[] { 1, 4 });
+        var third = model.Summary(new long[] { 1, 4 });
+
+        // If hooks from earlier calls leaked, later runs would record duplicate rows per layer.
+        Assert.Equal(first.Layers.Count, second.Layers.Count);
+        Assert.Equal(first.Layers.Count, third.Layers.Count);
+        Assert.Equal(3, third.Layers.Count); // root + fc1 + fc2, exactly once each
+    }
 }
 
 /// <summary>
@@ -273,4 +416,25 @@ internal sealed class TwoBranchSum : torch.nn.Module<Tensor, Tensor, Tensor>
     }
 
     public override Tensor forward(Tensor x1, Tensor x2) => branchA.call(x1) + branchB.call(x2);
+}
+
+/// <summary>
+/// A module whose forward pass returns two tensors instead of one, used to exercise
+/// <c>Summary()</c>'s <see cref="NotSupportedException"/> path for unsupported return shapes.
+/// </summary>
+internal sealed class TupleReturningModule : torch.nn.Module<Tensor, (Tensor, Tensor)>
+{
+    private readonly Linear fc;
+
+    public TupleReturningModule(long inFeatures, long outFeatures) : base(nameof(TupleReturningModule))
+    {
+        fc = Linear(inFeatures, outFeatures);
+        RegisterComponents();
+    }
+
+    public override (Tensor, Tensor) forward(Tensor x)
+    {
+        var y = fc.call(x);
+        return (y, y);
+    }
 }

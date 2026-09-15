@@ -6,26 +6,38 @@ Point it at any `torch.nn.Module` and a set of input shapes, and it runs a safe 
 
 ```
 Model: Sequential
-------------------------------------------------------------------------------------------------------------------------
-Layer (type)                             Input Shape            Output Shape           Param #          Mult-Adds
-========================================================================================================================
-Sequential (Sequential)                  [1, 1, 28, 28]         [1, 10]                --               --
-conv1 (Conv2d)                           [1, 1, 28, 28]         [1, 8, 28, 28]         80               56,448
-relu1 (ReLU)                             [1, 8, 28, 28]         [1, 8, 28, 28]         --               --
-pool1 (MaxPool2d)                        [1, 8, 28, 28]         [1, 8, 14, 14]         --               --
-flatten (Flatten)                        [1, 8, 14, 14]         [1, 1568]              --               --
-fc1 (Linear)                             [1, 1568]              [1, 10]                15,690           15,680
-========================================================================================================================
+----------------------------------------------------------------------------------------------------------------------------------
+Layer (type)                             Input Shape            Output Shape           Param #          Trainable Mult-Adds
+====================================================================================================================================
+Sequential                               [1, 1, 28, 28]         [1, 10]                --               --        --
+├─ conv1 (Conv2d)                        [1, 1, 28, 28]         [1, 8, 28, 28]         80               Yes       56,448
+├─ relu1 (ReLU)                          [1, 8, 28, 28]         [1, 8, 28, 28]         --               --        --
+├─ pool1 (MaxPool2d)                     [1, 8, 28, 28]         [1, 8, 14, 14]         --               --        --
+├─ flatten (Flatten)                     [1, 8, 14, 14]         [1, 1568]              --               --        --
+└─ fc1 (Linear)                          [1, 1568]              [1, 10]                15,690           Yes       15,680
+====================================================================================================================================
 Total params: 15,770
 Trainable params: 15,770
 Non-trainable params: 0
 Total mult-adds (MACs): 72,128
-------------------------------------------------------------------------------------------------------------------------
+------------------------------------------------------------------------------------------------------------------------------------
 Input size (MB): 0.00
 Forward pass size (MB): 0.06
 Params size (MB): 0.06
 Estimated Total Size (MB): 0.12
-========================================================================================================================
+====================================================================================================================================
+```
+
+Nested modules render as an actual tree (not just a flat, same-indent list), and a frozen sub-module (`requires_grad_(false)`) shows up clearly in the **Trainable** column:
+
+```
+Sequential
+├─ block (Sequential)
+│  ├─ conv (Conv2d)                      [1, 1, 28, 28]         [1, 8, 28, 28]         80               No        56,448
+│  ├─ bn (BatchNorm2d)                   [1, 8, 28, 28]         [1, 8, 28, 28]         16               No        6,272
+│  └─ relu (ReLU)                        [1, 8, 28, 28]         [1, 8, 28, 28]         --               --        --
+├─ pool (MaxPool2d)                      [1, 8, 28, 28]         [1, 8, 14, 14]         --               --        --
+└─ fc1 (Linear)                          [1, 1568]              [1, 64]                100,416          Yes       100,352
 ```
 
 ## Why
@@ -139,7 +151,7 @@ Each `LayerInfo` carries `Name`, `LayerType`, `Depth`, `ExecutionOrder`, `InputS
 ## Coverage & limitations (v0.1)
 
 - Per-layer shape capture works for modules with one, two, or three `Tensor` inputs and a single `Tensor` output — i.e. `Module<Tensor,Tensor>`, `Module<Tensor,Tensor,Tensor>`, and `Module<Tensor,Tensor,Tensor,Tensor>`. This covers essentially every built-in TorchSharp layer and typical branching modules. A module with a different forward signature (four-plus tensor inputs, non-tensor arguments, or a tuple return) won't get its own row, but its parameters are still counted correctly in the model-level totals.
-- MAC/FLOP estimates are computed precisely for `Linear` and convolution (`Conv1d`/`Conv2d`/`Conv3d`, including grouped convolutions) layers. Other layer types report `0` MACs (shown as `--`) — activation, normalization, and pooling layers are comparatively cheap and aren't yet modeled.
+- MAC/FLOP estimates are computed precisely for `Linear`, convolution (`Conv1d`/`Conv2d`/`Conv3d`, including grouped convolutions), and normalization layers (`BatchNorm*`, `InstanceNorm*`, `LayerNorm`, `GroupNorm` — counting their affine scale/shift step). Other layer types report `0` MACs (shown as `--`) — activations, pooling, dropout, and recurrent (RNN/LSTM/GRU) layers aren't yet modeled.
 - The top-level model must expose a public `call(Tensor, ...)` method matching the number of input shapes passed in — true for any standard `torch.nn.Module<...>` subclass.
 
 ## Building from source
