@@ -31,9 +31,14 @@ jobs:
       # "Trusted Publishing" settings, register this exact repo (JacobGoodchild/TorchSharpSummary)
       # and this workflow file path (.github/workflows/release.yml). Without that link, the OIDC
       # token exchange below is rejected. See https://www.nuget.org/policies/Trusted-Publishing.
+      #
+      # Pinned to a full commit SHA (v1.2.0), not the mutable "v1" tag: this action runs with
+      # id-token: write, so a moving tag would let a future repoint of NuGet/login's "v1" ref —
+      # intentional or not — change what code executes here without this file changing. Verified
+      # against https://github.com/NuGet/login's own tags before pinning; bump deliberately.
       - name: Log in to NuGet via OIDC
         id: nuget-login
-        uses: NuGet/login@v1
+        uses: NuGet/login@8d196754b4036150537f80ac539e15c2f1028841 # v1.2.0
         with:
           user: JacobGoodchild
 
