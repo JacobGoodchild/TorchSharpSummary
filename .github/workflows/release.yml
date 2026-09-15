@@ -1,0 +1,45 @@
+name: Release & Publish to NuGet
+
+on:
+  push:
+    tags:
+      - 'v*'
+
+permissions:
+  contents: read
+  id-token: write
+
+jobs:
+  publish:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout Code
+        uses: actions/checkout@v4
+
+      - name: Setup .NET
+        uses: actions/setup-dotnet@v4
+        with:
+          dotnet-version: '8.0.x'
+
+      - name: Run Tests
+        run: dotnet test --configuration Release
+
+      - name: Pack Package
+        run: dotnet pack src/TorchSharpSummary/TorchSharpSummary.csproj --configuration Release --output ./nupkg
+
+      # Requires Trusted Publishing to be configured on nuget.org first: on the package's
+      # "Trusted Publishing" settings, register this exact repo (JacobGoodchild/TorchSharpSummary)
+      # and this workflow file path (.github/workflows/release.yml). Without that link, the OIDC
+      # token exchange below is rejected. See https://www.nuget.org/policies/Trusted-Publishing.
+      - name: Log in to NuGet via OIDC
+        id: nuget-login
+        uses: NuGet/login@v1
+        with:
+          user: JacobGoodchild
+
+      - name: Push Package to NuGet
+        run: |
+          dotnet nuget push ./nupkg/*.nupkg \
+            --source https://api.nuget.org/v3/index.json \
+            --api-key ${{ steps.nuget-login.outputs.NUGET_API_KEY }} \
+            --skip-duplicate
